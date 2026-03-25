@@ -1,165 +1,183 @@
 ---
 name: hostinger-deploy
-description: Use when starting a new web app project from a Google Stitch design through to deploying on Hostinger shared hosting with a custom subdomain, or when deploying updates to an existing Hostinger project using the deploy scripts.
+description: Use when deploying a web app (frontend-only or full-stack) to Hostinger shared hosting with a fonbuild.com subdomain, or when deploying updates to an existing Hostinger project.
 ---
 
-# Hostinger Deploy Workflow
+# Hostinger Deploy
 
-## Overview
-Full workflow: Google Stitch design → React + Node.js app → live on Hostinger shared hosting with a custom subdomain. Three scripts handle the repeatable parts: `setup-ssh.sh` (once per machine), `new-subdomain.sh` (once per project), `deploy.sh` (every deploy).
+Deploy React (Vite) apps — with or without a Node.js backend — to Hostinger shared hosting under `*.fonbuild.com` subdomains.
 
-Scripts live in `scripts/` and config lives in `deploy.config.sh` (gitignored). Copy `deploy.config.example.sh` to get started.
+## Safety Rules
+
+**Do not overwrite existing projects.** When connecting a domain in hPanel:
+1. Use an **empty/unused website slot** (temp `*.hostingersite.com` URL, no custom domain), OR
+2. **Create a new website** via hPanel → Websites → Add website
+
+Never connect a subdomain to a site that already has an active project. Check the Websites list first.
+
+**Ask about backend needs before deploying.** If the project doesn't have a `server/` directory yet:
+> "Does this app need a backend? (e.g., form submissions, database, API, email notifications)"
+- **No backend**: use `--frontend-only` flag, skip PM2 setup
+- **Backend needed**: design the backend first (use brainstorming skill), then deploy full stack
 
 ---
 
-## Phase 1 — Design in Google Stitch
-1. Go to stitch.withgoogle.com — describe the app
-2. Iterate until the layout and components look right
-3. Export as **HTML/CSS** — treat it as a detailed mockup, not production code
+## Project Setup (once per project)
 
----
+### 1. Copy deploy scripts
 
-## Phase 2 — Convert Stitch Output to React
+Scripts live in `~/Documents/Github/Thrive Votes/scripts/`. Copy to the new project:
 
-**Scaffold:**
 ```bash
-npm create vite@latest my-app -- --template react
-cd my-app && npm install
-npm install -D tailwindcss postcss autoprefixer && npx tailwindcss init -p
-```
-Add to `tailwind.config.js` content: `["./index.html", "./src/**/*.{js,jsx}"]`
-Add to `src/index.css`: `@tailwind base; @tailwind components; @tailwind utilities;`
-
-**Convert each Stitch section:**
-1. Create `src/ComponentName.jsx`
-2. Paste Stitch HTML into `return ()` block
-3. Fix JSX: `class=` → `className=`, self-close void tags (`<img />`), inline styles → objects (`style={{ color: 'red' }}`)
-4. Replace inline CSS with Tailwind classes
-
-**Claude prompt for conversion:**
-> "Convert this HTML to a React JSX component using Tailwind CSS classes. Keep the same visual structure."
-> [paste HTML block]
-
----
-
-## Phase 3 — Backend
-Standard stack: Node.js + Express + MariaDB. Recommended structure:
-- `server/index.js` — Express setup, middleware, route imports
-- `server/db.js` — mysql2 connection pool
-- `server/routes/` — one file per resource
-- `server/schema.sql` — DB schema
-- `server/.env` — DB credentials (never commit)
-
-Local dev:
-```bash
-npm run dev                   # Frontend — Vite at localhost:5173
-cd server && node index.js    # API at localhost:3001
+mkdir -p scripts
+cp ~/Documents/Github/Thrive\ Votes/scripts/{deploy.sh,new-subdomain.sh,setup-ssh.sh} scripts/
+cp ~/Documents/Github/Thrive\ Votes/deploy.config.example.sh .
+chmod +x scripts/*.sh
 ```
 
-Set `VITE_API_URL=http://localhost:3001` in `.env.local` for local API routing.
+### 2. Create `deploy.config.sh`
 
----
+Copy the example and fill in values:
 
-## Phase 4 — New Subdomain (once per project)
-
-**Get Cloudflare credentials first:**
-- API token: dash.cloudflare.com/profile/api-tokens → Edit zone DNS → scope to your domain
-- Zone ID: Cloudflare → your domain → Overview → right sidebar
-
-Fill `CF_API_TOKEN` + `CF_ZONE_ID` into `deploy.config.sh`, then:
 ```bash
-./scripts/new-subdomain.sh <subdomain>
-# e.g. ./scripts/new-subdomain.sh myapp → creates myapp.yourdomain.com
+cp deploy.config.example.sh deploy.config.sh
 ```
 
-Follow the printed Hostinger hPanel steps (Domains → Connect domain → enter full subdomain → Next). Hostinger auto-installs SSL.
+| Key | Value | Notes |
+|-----|-------|-------|
+| `SSH_HOST` | `46.202.95.55` | Hostinger server IP |
+| `SSH_PORT` | `65002` | Always 65002 on Hostinger |
+| `SSH_USER` | `u904210699` | Hostinger username |
+| `DOMAIN` | `myapp.fonbuild.com` | The subdomain for this project |
+| `PM2_APP_NAME` | `myapp-api` | Only needed if backend exists |
+| `PM2_BIN` | `/home/$SSH_USER/.npm-global/bin/pm2` | PM2 binary location |
+| `NODE_BIN` | `/opt/alt/alt-nodejs20/root/usr/bin` | Hostinger Node.js path |
+| `CF_API_TOKEN` | *(from memory)* | See Cloudflare credentials in memory |
+| `CF_ZONE_ID` | *(from memory)* | See Cloudflare credentials in memory |
+| `CF_ROOT_DOMAIN` | `fonbuild.com` | Root domain |
+| `CF_HOSTINGER_TARGET` | *(from hPanel)* | The `*.hostingersite.com` temp URL of the **target** Hostinger site |
 
-⏳ Wait **1–4 hours** for SSL + routing. Verify: `curl https://<subdomain>.yourdomain.com/api/health`
+**Finding `CF_HOSTINGER_TARGET`:** In hPanel → Websites, find the empty site you're connecting to. Its temp URL (e.g., `salmon-wolverine-437450.hostingersite.com`) is the target. Each Hostinger site has a unique one.
 
----
+**Cloudflare credentials** are stored in memory (`reference_cloudflare_fonbuild.md`). Auto-fill `CF_API_TOKEN`, `CF_ZONE_ID`, `CF_ROOT_DOMAIN` from there.
 
-## Phase 5 — SSH Setup (once per machine)
+Add to `.gitignore`: `deploy.config.sh`
+
+### 3. Create subdomain DNS record
+
+**CRITICAL: Use an A record pointing to the raw server IP — NOT a CNAME to `*.hostingersite.com`.**
+
+A CNAME to the Hostinger temp URL routes through Hostinger's CDN layer, which doesn't recognize proxied external domains. This causes the parked/placeholder page to show indefinitely.
+
+```bash
+source deploy.config.sh
+
+# Create A record (proxied) pointing to the server IP
+curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+  -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
+  --data "{\"type\":\"A\",\"name\":\"myapp\",\"content\":\"$SSH_HOST\",\"ttl\":1,\"proxied\":true}"
+```
+
+Then in hPanel: Domains → Connect domain → enter `myapp.fonbuild.com` → Next.
+
+### 4. SSL via Cloudflare proxy
+
+**Cloudflare SSL must be set to Flexible** for Hostinger origins without their own SSL cert. Verify at: Cloudflare dashboard → fonbuild.com → SSL/TLS → set to Flexible. This only needs to be done once for the zone.
+
+### 5. SSH setup (once per machine)
+
 1. Set Hostinger SSH password: hPanel → Advanced → SSH Access → Change Password
-2. Run: `./scripts/setup-ssh.sh` — enter the password once, never again
-
-**Hostinger SSH details** (find in hPanel → Advanced → SSH Access):
-- Host: your server IP
-- Port: `65002` (always this on Hostinger shared hosting)
-- User: your hosting username (e.g. `u123456789`)
+2. Run `./scripts/setup-ssh.sh` — uses `sshpass` if available for non-interactive setup
 
 ---
 
-## Phase 6 — Deploy
+## Deploying
+
+### Subsequent deploys (most common)
+
 ```bash
-./scripts/deploy.sh                  # Full deploy (frontend + backend)
-./scripts/deploy.sh --frontend-only  # Skip backend + PM2 restart
-./scripts/deploy.sh --backend-only   # Skip frontend build/upload
+./scripts/deploy.sh                  # Full (frontend + backend)
+./scripts/deploy.sh --frontend-only  # Frontend only
+./scripts/deploy.sh --backend-only   # Backend only
 ```
 
-What it does: `npm run build` → rsync `dist/` → rsync `server/` (skips `.env`, `node_modules/`) → `npm install --production` on server → PM2 restart
+What it does:
+- Frontend: `npm run build` → rsync `dist/` to `public_html/` (excludes `.htaccess`)
+- Backend: rsync `server/` to `nodejs/` (excludes `.env`, `node_modules/`, `data/`) → `npm install --production` → PM2 restart
+
+### First deploy
+
+The deploy script's PM2 `restart` will fail if the app doesn't exist yet. For first deploy:
+
+1. Deploy frontend: `./scripts/deploy.sh --frontend-only`
+2. Upload `.htaccess` manually (if project has `public/.htaccess`):
+   ```bash
+   source deploy.config.sh
+   scp -P $SSH_PORT -i ~/.ssh/hostinger_$SSH_USER public/.htaccess $SSH_USER@$SSH_HOST:$REMOTE_PUBLIC_HTML/.htaccess
+   ```
+3. Upload backend files manually:
+   ```bash
+   rsync -az --exclude='.env' --exclude='node_modules/' --exclude='data/' \
+     -e "ssh -p $SSH_PORT -i ~/.ssh/hostinger_$SSH_USER" \
+     server/ $SSH_USER@$SSH_HOST:$REMOTE_NODEJS/
+   ```
+4. Install deps and start PM2:
+   ```bash
+   ssh -p $SSH_PORT -i ~/.ssh/hostinger_$SSH_USER $SSH_USER@$SSH_HOST \
+     "cd $REMOTE_NODEJS && PATH=$NODE_BIN:\$PATH npm install --production && \
+      PATH=$NODE_BIN:\$PATH HOME=/home/$SSH_USER $PM2_BIN start index.js \
+        --name $PM2_APP_NAME \
+        --cwd $REMOTE_NODEJS \
+        --interpreter $NODE_BIN/node && \
+      PATH=$NODE_BIN:\$PATH HOME=/home/$SSH_USER $PM2_BIN save"
+   ```
+   **`--cwd` is required** so `dotenv.config()` finds `.env`. Without it, PM2 uses its daemon's cwd and env vars won't load.
+   **`--interpreter` is required** because Hostinger doesn't have `node` in the default PATH.
+5. Create `.env` on server (via SSH or hPanel File Manager):
+   ```bash
+   ssh -p $SSH_PORT -i ~/.ssh/hostinger_$SSH_USER $SSH_USER@$SSH_HOST \
+     "cat > $REMOTE_NODEJS/.env << 'EOF'
+   PORT=3001
+   NODE_ENV=production
+   # Add app-specific env vars here
+   EOF"
+   ```
+
+After first deploy, `./scripts/deploy.sh` works for all subsequent deploys.
 
 ---
 
-## deploy.config.sh Reference
+## .htaccess for SPA + API Proxy
 
-| Key | Description | Example |
-|-----|-------------|---------|
-| `SSH_HOST` | Your Hostinger server IP | `46.x.x.x` |
-| `SSH_PORT` | Always 65002 on Hostinger | `65002` |
-| `SSH_USER` | Hostinger account username | `u123456789` |
-| `DOMAIN` | Your subdomain | `myapp.yourdomain.com` |
-| `REMOTE_PUBLIC_HTML` | Path to public_html | `/home/$SSH_USER/domains/$DOMAIN/public_html` |
-| `REMOTE_NODEJS` | Path to Node.js app folder | `/home/$SSH_USER/domains/$DOMAIN/nodejs` |
-| `PM2_APP_NAME` | Name used in `pm2 start` | `myapp-api` |
-| `PM2_BIN` | Full path to pm2 binary | `/home/$SSH_USER/.npm-global/bin/pm2` |
-| `NODE_BIN` | Node.js bin directory | `/opt/alt/alt-nodejs20/root/usr/bin` |
-| `CF_API_TOKEN` | Cloudflare API token (DNS:Edit) | — |
-| `CF_ZONE_ID` | Cloudflare Zone ID for your domain | — |
-| `CF_ROOT_DOMAIN` | Your root domain | `yourdomain.com` |
-| `CF_HOSTINGER_TARGET` | Hostinger temp URL for your site | `abc123.hostingersite.com` |
+Projects with a backend need this in `public/.htaccess` (Vite copies `public/` to `dist/`):
 
-Copy `deploy.config.example.sh` → `deploy.config.sh` (gitignored — never commit it)
+```apache
+RewriteEngine On
+RewriteRule ^api/(.*)$ http://127.0.0.1:3001/api/$1 [P,L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.html [L]
+```
+
+Frontend-only projects just need the SPA fallback (no API proxy line).
 
 ---
 
-## Hostinger Architecture Notes
+## Hostinger Environment
 
-Hostinger shared hosting can't make direct TCP connections from Apache to Node.js processes. The workaround is a **PHP reverse proxy**:
+| Detail | Value |
+|--------|-------|
+| Node.js path | `/opt/alt/alt-nodejs20/root/usr/bin` |
+| PM2 binary | `/home/$SSH_USER/.npm-global/bin/pm2` |
+| SSH port | `65002` |
+| Frontend location | `/home/$SSH_USER/domains/$DOMAIN/public_html` |
+| Backend location | `/home/$SSH_USER/domains/$DOMAIN/nodejs` |
+| PM2 logs | `pm2 logs <app-name>` (via SSH with correct PATH) |
 
-```
-Browser → Apache (public_html) → nodeproxy.php → Node.js :3000 → MariaDB
-```
-
-Required files in `public_html/`:
-- `.htaccess` — routes `/api/*` requests to `nodeproxy.php`
-- `nodeproxy.php` — PHP cURL proxy to Node.js
-
-These are excluded from rsync deploys (deploy.sh uses `--exclude='.htaccess' --exclude='nodeproxy.php'`) so they're never accidentally overwritten.
-
----
-
-## PM2 on Hostinger
-
-Node.js processes are managed with PM2. To start the app for the first time:
+**npm/node commands on Hostinger require PATH prefix:**
 ```bash
-# Via SSH
-PATH=/opt/alt/alt-nodejs20/root/usr/bin:/usr/local/bin:/usr/bin:/bin \
-HOME=/home/<your-user> \
-/home/<your-user>/.npm-global/bin/pm2 start index.js --name myapp-api
+PATH=/opt/alt/alt-nodejs20/root/usr/bin:$PATH npm install
 ```
-
-After SSH is set up, `deploy.sh` handles restarts automatically.
-
-**If you don't have SSH access yet** (e.g. during initial setup), restart PM2 via a temporary PHP file:
-```php
-<?php
-$pm2 = '/home/<your-user>/.npm-global/bin/pm2';
-$dir = '/home/<your-user>/domains/<your-site>/nodejs';
-putenv("PATH=/opt/alt/alt-nodejs20/root/usr/bin:/usr/local/bin:/usr/bin:/bin");
-putenv("HOME=/home/<your-user>");
-echo shell_exec("cd $dir && $pm2 restart myapp-api 2>&1");
-```
-Upload to `public_html/restart-node.php`, hit the URL, then **delete it immediately**.
 
 ---
 
@@ -167,24 +185,10 @@ Upload to `public_html/restart-node.php`, hit the URL, then **delete it immediat
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| Parked page after connecting domain | Hostinger routing still propagating | Wait 1–4 hours |
-| HTTPS TLS error (exit 35) | SSL still provisioning | Wait, retry |
-| PM2 not restarting via deploy.sh | SSH key not set up | Run `setup-ssh.sh` first |
-| `.env` not updated on server | rsync intentionally skips it | Update manually via hPanel File Manager |
-| Old JS bundles still loading | Stale files in `public_html/assets/` | Hard refresh or delete old asset files via File Manager |
-| `Permission denied` on SSH | Password not set or key not copied | Set password in hPanel → re-run `setup-ssh.sh` |
-
----
-
-## Setup Checklist (New Project)
-
-- [ ] Design in Google Stitch
-- [ ] Scaffold React + Vite + Tailwind
-- [ ] Convert Stitch HTML → React components
-- [ ] Build Express backend + MariaDB schema
-- [ ] Test locally
-- [ ] Copy `deploy.config.example.sh` → `deploy.config.sh` and fill in values
-- [ ] Run `./scripts/setup-ssh.sh` (first time on this machine)
-- [ ] Run `./scripts/new-subdomain.sh <name>` and follow Hostinger steps
-- [ ] Wait for SSL (~1–4 hours), verify `/api/health`
-- [ ] Run `./scripts/deploy.sh`
+| **Parked page persists for hours** | DNS CNAME points to `*.hostingersite.com` which routes through Hostinger CDN — CDN doesn't know proxied external domains | Replace CNAME with **A record → server IP** (e.g., `46.202.95.55`), proxied. This is the #1 gotcha. |
+| 503 on `/api/*` routes | PM2 not running or on wrong port | Check `pm2 list`. Ensure PM2 was started with `--cwd` so `.env` loads correctly. |
+| PM2 daemon dies, app on wrong port | PM2 started without `--cwd`, so `dotenv.config()` can't find `.env`, PORT defaults wrong | Restart with `--cwd $REMOTE_NODEJS --interpreter $NODE_BIN/node` |
+| 525 SSL Handshake error | Cloudflare SSL mode not set to Flexible | Set SSL to Flexible in Cloudflare dashboard (one-time per zone) |
+| `npm: command not found` on server | Node not in PATH | Prefix with `PATH=/opt/alt/alt-nodejs20/root/usr/bin:$PATH` |
+| PM2 restart fails on first deploy | App doesn't exist yet | Use `pm2 start` first, then `pm2 save` |
+| `.env` not updated on server | rsync intentionally skips it | Update via SSH or hPanel File Manager |
